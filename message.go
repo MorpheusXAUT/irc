@@ -22,12 +22,16 @@ const (
 	maxLength = 510 // Maximum length is 512 - 2 for the line endings.
 )
 
+var (
+	tagEscapeReplacer = strings.NewReplacer("\\:", ";", "\\s", " ", "\\r", "\r", "\\n", "\n")
+)
+
 func cutsetFunc(r rune) bool {
 	// Characters to trim from prefixes/messages.
 	return r == '\r' || r == '\n'
 }
 
-// Objects implementing the Sender interface are able to send messages to an IRC server.
+// Sender represents objects that are able to send messages to an IRC server.
 //
 // As there might be a message queue, it is possible that Send returns a nil
 // error, but the message is not sent (yet). The error value is only used when
@@ -48,20 +52,17 @@ type Sender interface {
 // <key>           ::= [ <vendor> '/' ] <sequence of letters, digits, hyphens (`-`)>
 // <escaped value> ::= <sequence of any characters except NUL, CR, LF, semicolon (`;`) and SPACE>
 // <vendor>        ::= <host>
-type Tags struct {
-	values map[string]string
-}
+type Tags map[string]string
 
 // ParseTags takes a string and attempts to create a Tags struct
-func ParseTags(raw string) (t *Tags) {
-	t = &Tags{
-		values: make(map[string]string),
-	}
+func ParseTags(raw string) (t Tags) {
+	t = make(Tags)
 
 	tags := strings.Split(raw, string(tagsSeparator))
 
 	for _, val := range tags {
-		tagParts := strings.Split(val, string(tagsEquals))
+		replacedVal := tagEscapeReplacer.Replace(val)
+		tagParts := strings.SplitN(replacedVal, string(tagsEquals), 2)
 		// Tag must at least contain a key
 		if len(tagParts) < 1 {
 			continue
@@ -69,36 +70,36 @@ func ParseTags(raw string) (t *Tags) {
 
 		// Tag only contains key, set empty value
 		if len(tagParts) == 1 {
-			t.values[tagParts[0]] = ""
+			t[tagParts[0]] = ""
 			continue
 		}
 
-		unescaped := strings.Replace(tagParts[1], "\\:", ";", -1)
-		unescaped = strings.Replace(unescaped, "\\s", " ", -1)
-		unescaped = strings.Replace(unescaped, "\\s", "\\", -1)
-		unescaped = strings.Replace(unescaped, "CR", "\r", -1)
-		unescaped = strings.Replace(unescaped, "LF", "\n", -1)
-
-		t.values[tagParts[0]] = unescaped
+		t[tagParts[0]] = tagParts[1]
 	}
 
 	return t
 }
 
 // GetTag checks whether a tag with the given key exists. The boolean return value indicates whether a value was found
-func (t *Tags) GetTag(key string) (string, bool) {
-	if val, ok := t.values[key]; ok {
-		return val, true
+func (t Tags) GetTag(key string) (string, bool) {
+	if t != nil {
+		if val, ok := t[key]; ok {
+			return val, true
+		}
 	}
 
 	return "", false
 }
 
 // String returns the string representation of all set message tags
-func (t *Tags) String() (s string) {
+func (t Tags) String() (s string) {
+	if t == nil {
+		return ""
+	}
+
 	var buf bytes.Buffer
 
-	for key, val := range t.values {
+	for key, val := range t {
 		buf.WriteString(key)
 
 		if len(val) > 0 {
@@ -229,7 +230,7 @@ func (p *Prefix) writeTo(buffer *bytes.Buffer) {
 //
 //    <crlf>     ::= CR LF
 type Message struct {
-	*Tags
+	Tags
 	*Prefix
 	Command  string
 	Params   []string
@@ -300,7 +301,7 @@ func ParseMessage(raw string) (m *Message) {
 	// Find prefix for trailer
 	i = indexByte(raw[j:], prefix)
 
-	if i < 0 {
+	if i < 0 || raw[j+i-1] != space {
 
 		// There is no trailing argument!
 		m.Params = strings.Split(raw[j:], string(space))
@@ -357,8 +358,29 @@ func (m *Message) Len() (length int) {
 // in length. This method forces that limit by discarding any characters
 // exceeding the length limit.
 func (m *Message) Bytes() []byte {
-
 	buffer := new(bytes.Buffer)
+
+	// Message tags
+	if m.Tags != nil {
+		buffer.WriteByte(tags)
+
+		i := 0
+		mapLen := len(m.Tags)
+		for k, v := range m.Tags {
+			buffer.WriteString(k)
+			if v != "" {
+				buffer.WriteByte(tagsEquals)
+				buffer.WriteString(v)
+			}
+			if i != mapLen-1 {
+				buffer.WriteByte(tagsSeparator)
+			}
+
+			i++
+		}
+
+		buffer.WriteByte(space)
+	}
 
 	// Message prefix
 	if m.Prefix != nil {
